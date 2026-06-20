@@ -1,0 +1,6 @@
+{
+  "name": "Slack Activity Summarizer & Dashboard",
+  "description": "An AI-powered dashboard that categorizes, threads, and summarizes Slack chat logs into action items, unresolved blockers, and urgency status for managers to review.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
