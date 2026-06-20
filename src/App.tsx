@@ -58,6 +58,11 @@ export default function App() {
   const [showDraftModal, setShowDraftModal] = useState<boolean>(false);
   const [copiedDraft, setCopiedDraft] = useState<boolean>(false);
 
+  // New States for pasting unstructured text or uploading .txt/.json files
+  const [unstructuredText, setUnstructuredText] = useState<string>("");
+  const [isParsingText, setIsParsingText] = useState<boolean>(false);
+  const [rawEditorTab, setRawEditorTab] = useState<"paste" | "json">("paste");
+
   // New item creators
   const [newBlockerDesc, setNewBlockerDesc] = useState<string>("");
   const [newBlockerReporter, setNewBlockerReporter] = useState<string>("Vikram");
@@ -310,6 +315,147 @@ export default function App() {
       setActiveTab("dashboard");
     } catch (err: any) {
       alert(`Invalid JSON format: ${err.message}`);
+    }
+  };
+
+  // Upload .txt, .json, or .text file
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = async (event) => {
+      const content = event.target?.result as string;
+      if (!content) return;
+
+      // Check if it looks like a JSON array
+      const trimmed = content.trim();
+      if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+        try {
+          const parsed = JSON.parse(trimmed);
+          if (Array.isArray(parsed)) {
+            setSlackMessages(parsed);
+            setRawJsonText(JSON.stringify(parsed, null, 2));
+            showToast(`Loaded ${parsed.length} messages from JSON file! 🚀`);
+            setActiveTab("dashboard");
+            return;
+          }
+        } catch (err) {
+          // Fall through to plain text
+        }
+      }
+
+      // If it is plain text (.txt/any transcripts), load into unstructured box
+      setUnstructuredText(content);
+      setRawEditorTab("paste");
+      showToast("Loaded text file content successfully into the paste box!");
+    };
+    reader.readAsText(file);
+  };
+
+  // Parser of unstructured text to turn into clean JSON
+  const handleParseUnstructuredText = async () => {
+    const trimmedText = unstructuredText.trim();
+    if (!trimmedText) {
+      showToast("Please paste some text or upload a .txt file first.");
+      return;
+    }
+
+    setIsParsingText(true);
+    try {
+      // Direct client side attempt if they write valid JSON in unstructured text
+      if (trimmedText.startsWith("[") && trimmedText.endsWith("]")) {
+        const parsed = JSON.parse(trimmedText);
+        if (Array.isArray(parsed)) {
+          setSlackMessages(parsed);
+          setRawJsonText(JSON.stringify(parsed, null, 2));
+          showToast(`Direct JSON parsed perfectly!`);
+          setActiveTab("dashboard");
+          setIsParsingText(false);
+          return;
+        }
+      }
+    } catch (e) {}
+
+    try {
+      const res = await fetch("/api/parse-raw-text", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: trimmedText }),
+      });
+
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({}));
+        throw new Error(errJson.error || `HTTP ${res.status}`);
+      }
+
+      const data = await res.json();
+      if (data && data.messages && Array.isArray(data.messages)) {
+        setSlackMessages(data.messages);
+        setRawJsonText(JSON.stringify(data.messages, null, 2));
+        showToast(`Gemini successfully structured ${data.messages.length} messages! 🚀`);
+        setActiveTab("dashboard");
+      } else {
+        throw new Error("Returned content is not a format-complying array of messages.");
+      }
+    } catch (err: any) {
+      console.warn("Server-side parsing failed (missing GEMINI_API_KEY?). Loading local client regex scanner fallback.", err);
+      
+      // Standalone regex chat scanner fallback
+      const lines = trimmedText.split("\n");
+      const parsedResult: SlackMessage[] = [];
+      let currentThreadId = "T1001";
+      let msgIndex = 1;
+
+      // Fallback heuristics: user names and text splitting
+      lines.forEach((line) => {
+        const cl = line.trim();
+        if (!cl) return;
+
+        let user = "TeamMember";
+        let messageText = cl;
+        let timeStr = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+        // Fallback heuristics: check if line starts with "[" or matches conversational prefixes
+        const bracketMatch = cl.match(/^\[([^\]]+)\]\s*([^:]+):\s*(.*)$/);
+        const leadingUserMatch = cl.match(/^([a-zA-Z0-9_-]+)\s+(\d{1,2}:\d{2})\s*:\s*(.*)$/);
+        const simpleColonMatch = cl.match(/^([a-zA-Z0-9_]+)\s*:\s*(.*)$/);
+
+        if (bracketMatch) {
+          timeStr = bracketMatch[1];
+          user = bracketMatch[2].trim();
+          messageText = bracketMatch[3].trim();
+        } else if (leadingUserMatch) {
+          user = leadingUserMatch[1].trim();
+          timeStr = leadingUserMatch[2].trim();
+          messageText = leadingUserMatch[3].trim();
+        } else if (simpleColonMatch) {
+          const checkUser = simpleColonMatch[1].trim();
+          if (checkUser.length > 1 && checkUser.length < 20) {
+            user = checkUser;
+            messageText = simpleColonMatch[2].trim();
+          }
+        }
+
+        parsedResult.push({
+          msg_id: `M_LP_${msgIndex++}`,
+          thread_id: currentThreadId,
+          user,
+          time: timeStr,
+          message: messageText
+        });
+      });
+
+      if (parsedResult.length > 0) {
+        setSlackMessages(parsedResult);
+        setRawJsonText(JSON.stringify(parsedResult, null, 2));
+        showToast(`Offline parser converted ${parsedResult.length} message lines. Click 'Re-Analyze' for full insights!`);
+        setActiveTab("dashboard");
+      } else {
+        alert("Failed to parse text. Please ensure lines are separated by newlines, with simple key structures (e.g. 'Rahul: Hello').");
+      }
+    } finally {
+      setIsParsingText(false);
     }
   };
 
@@ -1265,55 +1411,162 @@ export default function App() {
           </>
         )}
 
-        {/* TAB 2: RAW SLACK CHAT JSON WRITER / EDITOR */}
+        {/* TAB 2: RAW SLACK CHAT DATA / MULTI-FORMAT PASTING */}
         {activeTab === "raw-editor" && (
           <section id="raw-logs-playground" className="flex-1 p-6 overflow-y-auto space-y-4 max-w-5xl mx-auto w-full">
-            <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-4 border-b border-slate-100 gap-4 mb-4">
+            <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-xs space-y-6">
+              
+              <div className="flex flex-col md:flex-row md:items-center justify-between pb-4 border-b border-slate-100 gap-4">
                 <div>
-                  <h2 className="text-base font-extrabold text-slate-800">Raw Slack message JSON Data logs</h2>
+                  <h2 className="text-base font-extrabold text-slate-900">Import Slack Message Logs</h2>
                   <p className="text-xs text-slate-500 mt-1">
-                    Directly feed custom Slack archives to test our AI Operations Categorizer! Paste your team's Slack export array below.
+                    Feed raw text, export files, or custom JSON arrays. Your standups and chat timelines are automatically parsed by Gemini!
                   </p>
                 </div>
                 
-                <div className="flex items-center gap-2 shrink-0">
+                <div className="flex items-center gap-2 bg-slate-100 p-1 rounded-lg shrink-0 border border-slate-200">
                   <button
-                    onClick={handleResetToDefault}
-                    className="px-3 py-1.5 border border-slate-200 hover:bg-slate-50 font-bold rounded-lg text-xs"
+                    onClick={() => setRawEditorTab("paste")}
+                    className={`px-3 py-1.5 rounded-md text-[11px] font-bold transition-all cursor-pointer ${
+                      rawEditorTab === "paste" ? "bg-white text-slate-900 shadow-xs" : "text-slate-500 hover:text-slate-900"
+                    }`}
                   >
-                    Load Default Demo Logs
+                    📝 Paste Text/TXT File
                   </button>
                   <button
-                    onClick={handleSaveRawJson}
-                    className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-lg text-xs shadow-xs"
+                    onClick={() => setRawEditorTab("json")}
+                    className={`px-3 py-1.5 rounded-md text-[11px] font-bold transition-all cursor-pointer ${
+                      rawEditorTab === "json" ? "bg-white text-slate-900 shadow-xs" : "text-slate-500 hover:text-slate-900"
+                    }`}
                   >
-                    Save & Load Dataset
+                    ⚙️ Raw JSON Array ({slackMessages.length})
                   </button>
                 </div>
               </div>
 
-              <div className="space-y-3">
-                <label className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">
-                  JSON Message Array format [ {"{"} msg_id, thread_id, user, time, message {"}"} ]
-                </label>
-                <textarea
-                  value={rawJsonText}
-                  onChange={(e) => setRawJsonText(e.target.value)}
-                  rows={15}
-                  placeholder="[{'msg_id': 'M1', 'thread_id': 'T1', 'user': 'Vikram', 'time': '09:00', 'message': 'Update?'}]"
-                  className="w-full font-mono text-xs p-4 bg-slate-900 text-slate-100 rounded-xl border border-slate-800 focus:outline-hidden focus:ring-1 focus:ring-indigo-500"
-                />
+              {/* Sub Tab: Paste Plain Text & TXT upload */}
+              {rawEditorTab === "paste" && (
+                <div className="space-y-4" id="paste-plain-tab">
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div className="md:col-span-2 space-y-2">
+                      <label className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">
+                        Paste Unstructured Chat transcripts or logs below
+                      </label>
+                      <textarea
+                        value={unstructuredText}
+                        onChange={(e) => setUnstructuredText(e.target.value)}
+                        rows={10}
+                        placeholder={`Example formatted message history:
+Alex: Standup is started!
+Rahul: I am currently working on the registration screens. I'm blocked by DB credentials!
+Sneha: I’ll check that credential block for you.`}
+                        className="w-full font-sans text-xs p-3 bg-slate-950 text-slate-100 rounded-xl border border-slate-800 focus:outline-hidden focus:ring-1 focus:ring-indigo-500 focus:bg-slate-900 focus:text-white"
+                      />
+                    </div>
+
+                    <div className="bg-slate-50 hover:bg-slate-100/70 border-2 border-dashed border-slate-200 hover:border-indigo-300 rounded-2xl p-5 flex flex-col items-center justify-center text-center transition cursor-pointer relative h-[184px] mt-6">
+                      <input
+                        type="file"
+                        accept=".txt,.json,.text"
+                        onChange={handleFileUpload}
+                        className="absolute inset-0 opacity-0 cursor-pointer"
+                      />
+                      <FileText className="w-8 h-8 text-slate-400 mb-2 animate-bounce" />
+                      <p className="text-xs font-bold text-slate-700">Drag & Drop or Click to Upload</p>
+                      <p className="text-[10px] text-slate-400 mt-1 max-w-[180px]">
+                        Supports `.txt`, `.json`, or `.text` files directly!
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between pt-2">
+                    <button
+                      onClick={handleResetToDefault}
+                      className="px-4 py-2 border border-slate-200 hover:bg-slate-50 text-slate-700 font-bold rounded-xl text-xs transition cursor-pointer"
+                    >
+                      Reset to Default logs
+                    </button>
+
+                    <button
+                      onClick={handleParseUnstructuredText}
+                      disabled={isParsingText}
+                      className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl text-xs shadow-md transition flex items-center gap-2 hover:scale-[1.01] active:scale-[0.99] disabled:opacity-50 cursor-pointer"
+                    >
+                      {isParsingText ? (
+                        <>
+                          <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                          Parsing logs with Gemini...
+                        </>
+                      ) : (
+                        <>
+                          <Sparkles className="w-3.5 h-3.5" />
+                          Parse & Load message stream
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Sub Tab: Direct JSON array editor */}
+              {rawEditorTab === "json" && (
+                <div className="space-y-4" id="json-array-tab">
+                  <div className="space-y-2">
+                    <div className="flex justify-between items-center">
+                      <label className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">
+                        JSON Message Array format [ {"{"} msg_id, thread_id, user, time, message {"}"} ]
+                      </label>
+                      <button
+                        onClick={() => {
+                          try {
+                            const pretty = JSON.stringify(JSON.parse(rawJsonText), null, 2);
+                            setRawJsonText(pretty);
+                            showToast("JSON formatted/prettified!");
+                          } catch (e: any) {
+                            alert("Invalid JSON format in the textarea.");
+                          }
+                        }}
+                        className="text-xs text-indigo-600 hover:underline font-bold cursor-pointer font-sans"
+                      >
+                        Prettify format
+                      </button>
+                    </div>
+                    <textarea
+                      value={rawJsonText}
+                      onChange={(e) => setRawJsonText(e.target.value)}
+                      rows={12}
+                      placeholder="[{'msg_id': 'M1', 'thread_id': 'T1001', 'user': 'Vikram', 'time': '09:00', 'message': 'Standup started'}]"
+                      className="w-full font-mono text-xs p-4 bg-slate-950 text-slate-100 rounded-xl border border-slate-800 focus:outline-hidden focus:ring-1 focus:ring-indigo-500"
+                    />
+                  </div>
+
+                  <div className="flex justify-between items-center">
+                    <button
+                      onClick={handleResetToDefault}
+                      className="px-4 py-2 border border-slate-200 hover:bg-slate-50 text-slate-700 font-bold rounded-xl text-xs transition cursor-pointer"
+                    >
+                      Load Default Dataset
+                    </button>
+                    <button
+                      onClick={handleSaveRawJson}
+                      className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl text-xs shadow-md transition cursor-pointer"
+                    >
+                      Save & Apply JSON list
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <div className="p-4 bg-indigo-50/50 text-indigo-950 border border-indigo-100 rounded-xl text-xs space-y-2 leading-relaxed flex items-start gap-3">
+                <span className="text-base select-none shrink-0">💡</span>
+                <div>
+                  <p className="font-extrabold text-indigo-900">Dynamic Operations Playground:</p>
+                  <p className="text-[11px] text-indigo-950/80 mt-0.5">
+                    Once parsed and loaded, return to the **Dashboard** and press the **Re-Analyze with Gemini** button. The server will dynamically analyze your custom logs to detect blockers, assignees, actions, and generate a standup progress update email!
+                  </p>
+                </div>
               </div>
 
-              <div className="mt-5 p-4 bg-amber-50 text-amber-900 border border-amber-100 rounded-xl text-xs space-y-2 leading-relaxed">
-                <p className="font-semibold flex items-center gap-1">
-                  🎁 Playground Tip:
-                </p>
-                <p className="text-[11px] text-amber-800">
-                  You can append custom messages containing issues (e.g., “Server is throwing 500 error, urgent blocker on database credentials!”), save the changes, and click the <strong>Re-Analyze with Gemini</strong> button on the dashboard to see the AI dynamically extract, cluster them, categorize the urgency, and set the status!
-                </p>
-              </div>
             </div>
           </section>
         )}

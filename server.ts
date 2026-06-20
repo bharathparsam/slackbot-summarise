@@ -165,6 +165,63 @@ app.post("/api/analyze-threads", async (req, res) => {
   }
 });
 
+// API 3: Parse Unstructured Raw Chat Text or transcripts using Gemini
+app.post("/api/parse-raw-text", async (req, res) => {
+  try {
+    const { text } = req.body;
+    if (!text || typeof text !== "string" || !text.trim()) {
+      res.status(400).json({ error: "Missing or invalid 'text' parameter." });
+      return;
+    }
+
+    const ai = getGenAI();
+    const prompt = `You are a professional chat parser. Convert the following unstructured chat transcript (which could be plain copy-pasted logs, a raw communication transcript from Slack / Teams / Discord, or lines from a text/txt file) into a clean, structured JSON array of individual messages.
+
+If the transcript contains multiple topics, segment them into reasonable thread IDs like:
+"T1001" for topic A, "T1002" for topic B, etc.
+If it is a single stream/flow of standard standup messages, you can group them under a single thread ID or segment into 2-3 logical threads depending on the focus blocks.
+
+Provide consistent username handles for the "user" field. Ensure times are formatted as standard modern "HH:MM". If no timestamp or user is mentioned in a line, infer or assign them sequentially so that the conversational flow is complete.
+
+Here is the unstructured raw transcript content:
+---
+${text.slice(0, 15000)}
+---
+
+Generate ONLY a valid JSON array matching the required schema. Do not write anything else.`;
+
+    const response = await ai.models.generateContent({
+      model: "gemini-3.5-flash",
+      contents: prompt,
+      config: {
+        systemInstruction: "You are a precise, data-oriented parser specializing in turning messy communication logs into clean structured JSON.",
+        temperature: 0.1,
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            required: ["msg_id", "thread_id", "user", "time", "message"],
+            properties: {
+              msg_id: { type: Type.STRING },
+              thread_id: { type: Type.STRING },
+              user: { type: Type.STRING },
+              time: { type: Type.STRING },
+              message: { type: Type.STRING },
+            }
+          }
+        }
+      }
+    });
+
+    const parsedMessages = JSON.parse(response.text?.trim() || "[]");
+    res.json({ messages: parsedMessages });
+  } catch (error: any) {
+    console.error("Parse raw text API failed:", error);
+    res.status(500).json({ error: error.message || "Internal Server Error occurred during parsing." });
+  }
+});
+
 // Configure Vite or Static files depending on mode
 async function initServer() {
   if (process.env.NODE_ENV !== "production") {
