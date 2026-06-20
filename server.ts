@@ -223,26 +223,32 @@ Generate ONLY a valid JSON array matching the required schema. Do not write anyt
 });
 
 // Configure Vite or Static files depending on mode
-async function initServer() {
-  if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa",
-    });
-    app.use(vite.middlewares);
-  } else {
-    const distPath = path.join(process.cwd(), "dist");
-    app.use(express.static(distPath));
-    app.get("*", (req, res) => {
-      res.sendFile(path.join(distPath, "index.html"));
-    });
-  }
+const isVercel = process.env.VERCEL === "1" || !!process.env.NOW_BUILDER;
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Slack Analyzer server listening at http://0.0.0.0:${PORT}`);
+if (!isVercel) {
+  const initServer = async () => {
+    if (process.env.NODE_ENV !== "production") {
+      const vite = await createViteServer({
+        server: { middlewareMode: true },
+        appType: "spa",
+      });
+      app.use(vite.middlewares);
+    } else {
+      const distPath = path.join(process.cwd(), "dist");
+      app.use(express.static(distPath));
+      app.get("*", (req, res) => {
+        res.sendFile(path.join(distPath, "index.html"));
+      });
+    }
+
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log(`Slack Analyzer server listening at http://0.0.0.0:${PORT}`);
+    });
+  };
+
+  initServer().catch((e) => {
+    console.error("Vite integration setup failed:", e);
   });
 }
 
-initServer().catch((e) => {
-  console.error("Vite integration setup failed:", e);
-});
+export default app;
