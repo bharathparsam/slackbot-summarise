@@ -1,8 +1,7 @@
 import express from "express";
 import path from "path";
 import dotenv from "dotenv";
-import { createServer as createViteServer } from "vite";
-import { DEFAULT_SLACK_MESSAGES } from "./src/defaultData.js";
+import { DEFAULT_SLACK_MESSAGES } from "./src/defaultData";
 import { GoogleGenAI, Type } from "@google/genai";
 
 dotenv.config();
@@ -228,6 +227,7 @@ const isVercel = process.env.VERCEL === "1" || !!process.env.NOW_BUILDER;
 if (!isVercel) {
   const initServer = async () => {
     if (process.env.NODE_ENV !== "production") {
+      const { createServer: createViteServer } = await import("vite");
       const vite = await createViteServer({
         server: { middlewareMode: true },
         appType: "spa",
