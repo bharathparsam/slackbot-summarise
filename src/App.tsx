@@ -44,7 +44,7 @@ import { PRELOADED_DASHBOARD_DATA } from "./preloadedData.js";
 
 export default function App() {
   // Navigation & View State
-  const [activeTab, setActiveTab] = useState<"dashboard" | "raw-editor" | "history" | "guide">("dashboard");
+  const [activeTab, setActiveTab] = useState<"dashboard" | "raw-editor" | "history">("dashboard");
   const [selectedThreadId, setSelectedThreadId] = useState<string>("T1001");
   const [searchQuery, setSearchQuery] = useState<string>("");
   const [urgencyFilter, setUrgencyFilter] = useState<string>("All");
@@ -749,14 +749,6 @@ export default function App() {
             <History className="w-3.5 h-3.5 text-indigo-600" />
             History Archive ({historyList.length})
           </button>
-          <button
-            onClick={() => setActiveTab("guide")}
-            className={`px-3 py-1.5 rounded-md text-xs font-bold transition-all ${
-              activeTab === "guide" ? "bg-white text-slate-900 shadow-xs" : "text-slate-500 hover:text-slate-900"
-            }`}
-          >
-            Gemini Setup Guide
-          </button>
         </div>
 
         <div className="flex items-center gap-4">
@@ -827,19 +819,13 @@ export default function App() {
       </div>
 
       {apiError && (
-        <div className="bg-red-50 border-b border-red-200 px-6 py-3 flex items-center justify-between text-xs text-red-700 gap-4">
+        <div className="bg-red-50 border-b border-red-200 px-6 py-3 flex items-center text-xs text-red-700 gap-4">
           <div className="flex items-center gap-2">
             <Info className="w-4 h-4 text-red-500 shrink-0" />
             <span>
               <strong>Gemini API is not fully configured or ran into limits:</strong> {apiError}. Using high-fidelity local preloaded standalone data so the developer playground is 100% active.
             </span>
           </div>
-          <button
-            onClick={() => setActiveTab("guide")}
-            className="px-2.5 py-1 bg-red-100 hover:bg-red-200 rounded text-[10px] font-bold uppercase transition"
-          >
-            Setup Instructions
-          </button>
         </div>
       )}
 
@@ -1938,77 +1924,7 @@ Sneha: I’ll check that credential block for you.`}
           </section>
         )}
 
-        {/* TAB 3: SETUP INSTRUCTIONS / HELP CENTER */}
-        {activeTab === "guide" && (
-          <section id="help-setup-center" className="flex-1 p-6 overflow-y-auto space-y-4 max-w-4xl mx-auto w-full">
-            <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-xs space-y-6">
-              
-              <div>
-                <h2 className="text-base font-extrabold text-slate-800">Gemini AI API Configuration Guide</h2>
-                <p className="text-xs text-slate-500 mt-1">
-                  Follow these simple instructions to connect your private Gemini API Key for actual production-grade Slack summarizing!
-                </p>
-              </div>
 
-              <div className="space-y-4">
-                
-                <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 text-xs text-slate-700 leading-normal space-y-3">
-                  <h3 className="font-bold text-slate-800 uppercase tracking-wide text-[10px]">How it works</h3>
-                  <p>
-                    This app utilizes the modern official <code>@google/genai</code> SDK on our Node.js container backend to categorize Slack chatter. All private secrets are securely parsed server-side to guarantee client safety.
-                  </p>
-                  
-                  <div className="bg-white border border-slate-200 p-3 rounded-lg flex items-start gap-2 text-[11px]">
-                    <span className="text-slate-400">🛡️</span>
-                    <span>
-                      API keys are mapped securely inside the <strong>Settings</strong> button in your AI Studio editor's dashboard. Never write real API keys inside codebase files!
-                    </span>
-                  </div>
-                </div>
-
-                <div className="space-y-3 text-xs leading-relaxed text-slate-700">
-                  <h3 className="font-bold text-slate-950">Step-by-Step Instructions</h3>
-                  
-                  <ol className="list-decimal list-inside space-y-2 text-[11px]">
-                    <li>
-                      Visit the <a href="https://aistudio.google.com" target="_blank" rel="noreferrer" className="text-indigo-600 hover:underline inline-flex items-center gap-0.5 font-bold">Google AI Studio Dashboard</a> and click <strong>Get API Key</strong>.
-                    </li>
-                    <li>
-                      Generate a secure API Key.
-                    </li>
-                    <li>
-                      In the developer container editor UI, click the <strong>Settings (Gear Icon) / Secrets</strong> menu.
-                    </li>
-                    <li>
-                      Set <code>GEMINI_API_KEY</code> as the secret key name, and paste your generated credential as the value.
-                    </li>
-                    <li>
-                      Return to this dashboard and hit the <strong>Re-Analyze with Gemini</strong> button to trigger!
-                    </li>
-                  </ol>
-                </div>
-
-                <div className="pt-4 border-t border-slate-100">
-                  <h3 className="text-xs font-bold text-slate-800 mb-2">Simulated Standalone Backup</h3>
-                  <p className="text-xs text-slate-500 leading-relaxed">
-                    If no API key is specified, the application beautifully falls back to displaying our parsed logs array showing 100 actual Slack messages from the standup log, allowing you to instantly assess operations.
-                  </p>
-                </div>
-
-                <button
-                  onClick={() => {
-                    setActiveTab("dashboard");
-                    showToast("Returned to current dashboard metrics");
-                  }}
-                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-extrabold shadow-sm transition"
-                >
-                  Return to Dashboard
-                </button>
-
-              </div>
-            </div>
-          </section>
-        )}
 
       </div>
 
