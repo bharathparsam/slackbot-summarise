@@ -40,3 +40,17 @@ export interface DashboardData {
   cleanThreadsCount: number;
   threads: ThreadAnalysis[];
 }
+
+export interface HistoryRecord {
+  id: string;
+  created_at: string;
+  title: string;
+  messages_count: number;
+  summary: string;
+  project_status: string;
+  total_blockers: number;
+  attention_required_count: number;
+  clean_threads_count: number;
+  threads: ThreadAnalysis[];
+}
+

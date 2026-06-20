@@ -32,15 +32,19 @@ import {
   FileJson,
   PlusSquare,
   Flame,
-  ArrowRight
+  ArrowRight,
+  History,
+  Database,
+  Trash2,
+  Calendar
 } from "lucide-react";
-import { SlackMessage, DashboardData, ThreadAnalysis, BlockerItem, ActionItem } from "./types.js";
+import { SlackMessage, DashboardData, ThreadAnalysis, BlockerItem, ActionItem, HistoryRecord } from "./types.js";
 import { DEFAULT_SLACK_MESSAGES } from "./defaultData.js";
 import { PRELOADED_DASHBOARD_DATA } from "./preloadedData.js";
 
 export default function App() {
   // Navigation & View State
-  const [activeTab, setActiveTab] = useState<"dashboard" | "raw-editor" | "guide">("dashboard");
+  const [activeTab, setActiveTab] = useState<"dashboard" | "raw-editor" | "history" | "guide">("dashboard");
   const [selectedThreadId, setSelectedThreadId] = useState<string>("T1001");
   const [searchQuery, setSearchQuery] = useState<string>("");
   const [urgencyFilter, setUrgencyFilter] = useState<string>("All");
@@ -52,7 +56,19 @@ export default function App() {
   const [dashboardData, setDashboardData] = useState<DashboardData>(PRELOADED_DASHBOARD_DATA);
   const [isAnalyzing, setIsAnalyzing] = useState<boolean>(false);
   const [apiError, setApiError] = useState<string | null>(null);
-  
+
+  // Database History States
+  const [historyList, setHistoryList] = useState<HistoryRecord[]>([]);
+  const [dbConfig, setDbConfig] = useState<{ useSupabase: boolean; supabaseUrl: string | null; hasKey: boolean; historyFilePath: string }>({
+    useSupabase: false,
+    supabaseUrl: null,
+    hasKey: false,
+    historyFilePath: "",
+  });
+  const [isSavingHistory, setIsSavingHistory] = useState<boolean>(false);
+  const [isLoadingHistory, setIsLoadingHistory] = useState<boolean>(false);
+  const [customHistoryTitle, setCustomHistoryTitle] = useState<string>("");
+
   // Custom interactive editing states
   const [rawJsonText, setRawJsonText] = useState<string>(() => JSON.stringify(DEFAULT_SLACK_MESSAGES, null, 2));
   const [showDraftModal, setShowDraftModal] = useState<boolean>(false);
@@ -83,6 +99,100 @@ export default function App() {
     setTimeout(() => setToastMessage(null), 3000);
   };
 
+  const loadHistoryItemIntoDashboard = (item: HistoryRecord) => {
+    setDashboardData({
+      summary: item.summary,
+      projectStatus: item.project_status || "Stable",
+      totalBlockers: item.total_blockers !== undefined ? item.total_blockers : 0,
+      attentionRequiredCount: item.attention_required_count !== undefined ? item.attention_required_count : 0,
+      cleanThreadsCount: item.clean_threads_count !== undefined ? item.clean_threads_count : 0,
+      threads: item.threads || [],
+    });
+    if (item.threads && item.threads.length > 0) {
+      setSelectedThreadId(item.threads[0].threadId);
+    }
+    setActiveTab("dashboard");
+    showToast(`Loaded summary snapshot: "${item.title}" into active Dashboard! 🎯`);
+  };
+
+  const fetchDbConfig = async () => {
+    try {
+      const res = await fetch("/api/db-config");
+      if (res.ok) {
+        const data = await res.json();
+        setDbConfig(data);
+      }
+    } catch (err) {
+      console.warn("Could not read DB config details:", err);
+    }
+  };
+
+  const fetchHistory = async () => {
+    setIsLoadingHistory(true);
+    try {
+      const res = await fetch("/api/history");
+      if (res.ok) {
+        const data = await res.json();
+        setHistoryList(data.list || []);
+      }
+    } catch (err) {
+      console.warn("Could not load reporting history archive:", err);
+    } finally {
+      setIsLoadingHistory(false);
+    }
+  };
+
+  const saveCurrentDashboardToHistory = async (customTitle?: string) => {
+    setIsSavingHistory(true);
+    try {
+      const bodyPayload = {
+        title: customTitle || `Manual Standup Archive - ${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`,
+        messages_count: slackMessages.length,
+        summary: dashboardData.summary,
+        project_status: dashboardData.projectStatus,
+        total_blockers: dashboardData.totalBlockers,
+        attention_required_count: dashboardData.attentionRequiredCount,
+        clean_threads_count: dashboardData.cleanThreadsCount,
+        threads: dashboardData.threads,
+      };
+
+      const res = await fetch("/api/history", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(bodyPayload),
+      });
+
+      if (!res.ok) {
+        throw new Error("HTTP Status Code " + res.status);
+      }
+
+      const resData = await res.json();
+      if (resData.success) {
+        showToast(resData.warning ? `Saved! ${resData.warning}` : "Successfully archived standup report to history! 💾");
+        await fetchHistory();
+      }
+    } catch (err: any) {
+      showToast("Failed to save report to history: " + err.message);
+    } finally {
+      setIsSavingHistory(false);
+      setCustomHistoryTitle("");
+    }
+  };
+
+  const deleteHistoryRecord = async (id: string) => {
+    try {
+      const res = await fetch(`/api/history/${id}`, {
+        method: "DELETE",
+      });
+      if (res.ok) {
+        showToast("Historical standup archive removed 🗑️");
+        await fetchHistory();
+      }
+    } catch (err: any) {
+      showToast("Error deleting history entry: " + err.message);
+    }
+  };
+
   // Fetch initial slack messages and analysis if available on server
   useEffect(() => {
     const fetchInitialData = async () => {
@@ -100,6 +210,8 @@ export default function App() {
       }
     };
     fetchInitialData();
+    fetchDbConfig();
+    fetchHistory();
   }, []);
 
   // Sync calculations based on current state (so changes are live-reflected!)
@@ -156,6 +268,35 @@ export default function App() {
       const analyzedResult: DashboardData = await res.json();
       setDashboardData(analyzedResult);
       showToast("Slack signal successfully analyzed with Gemini 3.5 Flash! 🚀");
+
+      // Auto archive newly generated summaries to history database!
+      try {
+        const blockIndicator = analyzedResult.totalBlockers > 0 ? `${analyzedResult.totalBlockers} active blockers` : "Stable Health";
+        const bodyPayload = {
+          title: `Daily Summary - ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} (${blockIndicator})`,
+          messages_count: slackMessages.length,
+          summary: analyzedResult.summary,
+          project_status: analyzedResult.projectStatus,
+          total_blockers: analyzedResult.totalBlockers,
+          attention_required_count: analyzedResult.attentionRequiredCount,
+          clean_threads_count: analyzedResult.cleanThreadsCount,
+          threads: analyzedResult.threads,
+        };
+        const histRes = await fetch("/api/history", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(bodyPayload),
+        });
+        if (histRes.ok) {
+          const histData = await histRes.json();
+          if (histData.success && histData.record) {
+            setHistoryList(prev => [histData.record, ...prev]);
+          }
+        }
+      } catch (autoSaveError) {
+        console.warn("Silent auto save to history had an issue", autoSaveError);
+      }
+
     } catch (err: any) {
       console.error(err);
       setApiError(err.message || "Unknown error occurred context.");
@@ -598,6 +739,15 @@ export default function App() {
           >
             <FileJson className="w-3.5 h-3.5" />
             Raw Logs Editor ({slackMessages.length})
+          </button>
+          <button
+            onClick={() => setActiveTab("history")}
+            className={`px-3 py-1.5 rounded-md text-xs font-bold transition-all flex items-center gap-1.5 ${
+              activeTab === "history" ? "bg-white text-slate-900 shadow-xs" : "text-slate-500 hover:text-slate-900"
+            }`}
+          >
+            <History className="w-3.5 h-3.5 text-indigo-600" />
+            History Archive ({historyList.length})
           </button>
           <button
             onClick={() => setActiveTab("guide")}
@@ -1567,6 +1717,223 @@ Sneha: I’ll check that credential block for you.`}
                 </div>
               </div>
 
+            </div>
+          </section>
+        )}
+
+        {/* TAB 2.5: HISTORY ARCHIVE & PERSISTENCE SECTION */}
+        {activeTab === "history" && (
+          <section id="history-archive-center" className="flex-grow p-6 overflow-y-auto space-y-6 max-w-5xl mx-auto w-full">
+            
+            {/* Connection Status & Setup Hub */}
+            <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-xs space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div>
+                  <h2 className="text-base font-extrabold text-slate-800 flex items-center gap-2">
+                    <Database className="w-5 h-5 text-indigo-600" />
+                    Database Persistence Hub
+                  </h2>
+                  <p className="text-xs text-slate-500 mt-1">
+                    Optionally integrate Supabase SQL Cloud to store daily standups and chronological milestones.
+                  </p>
+                </div>
+
+                <div className="shrink-0 flex items-center gap-2">
+                  {dbConfig.useSupabase ? (
+                    <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-emerald-50 text-emerald-800 font-extrabold rounded-full text-[10px] uppercase border border-emerald-200">
+                      <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                      Connected to Supabase
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-amber-50 text-amber-800 font-extrabold rounded-full text-[10px] uppercase border border-amber-200">
+                      <span className="w-2.5 h-2.5 rounded-full bg-amber-500"></span>
+                      Local JSON Fallback Mode
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {/* Status Notice Details */}
+              <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-2 text-xs text-slate-600 leading-relaxed">
+                {dbConfig.useSupabase ? (
+                  <p>
+                    <strong>Active Database:</strong> Cloud SQL on Supabase (<code>{dbConfig.supabaseUrl}</code>). 
+                    Summaries generated by <strong>Gemini 3.5</strong> are saved instantly in real-time in your cloud PostgreSQL schema.
+                  </p>
+                ) : (
+                  <>
+                    <p>
+                      Currently archiving your audits locally to <code>historyDb.json</code> in your project files. This allows testing the history features, loading, and deleting records instantly!
+                    </p>
+                    <p className="font-semibold text-slate-700">
+                      🔗 Deploying to Vercel/Production? Simply add <code>SUPABASE_URL</code> and <code>SUPABASE_ANON_KEY</code> to Vercel's Environment Variables (or code `.env`) to swap seamlessly to your Cloud PostgreSQL database!
+                    </p>
+                  </>
+                )}
+              </div>
+
+              {/* Expander: How to set up table in Supabase */}
+              <details className="group border border-slate-200 rounded-xl bg-white text-xs text-slate-700">
+                <summary className="p-3.5 font-bold text-slate-800 hover:bg-slate-50 cursor-pointer list-none flex justify-between items-center select-none">
+                  <span>🛠️ Supabase SQL Table Setup Command (Click to Copy Code)</span>
+                  <ChevronRight className="w-4 h-4 text-slate-400 group-open:rotate-90 transition-transform" />
+                </summary>
+                <div className="p-4 border-t border-slate-200 bg-slate-950 text-slate-100 font-mono text-[10px] rounded-b-xl overflow-x-auto leading-relaxed">
+                  <p className="text-slate-400 select-none mb-2">-- Run this command in your Supabase SQL Editor to provision the table:</p>
+                  <pre className="select-all">{`CREATE TABLE IF NOT EXISTS standup_history (
+  id bigint primary key generated always as identity,
+  created_at timestamp with time zone default now() not null,
+  title text not null,
+  messages_count int default 0,
+  summary text,
+  project_status text,
+  total_blockers int default 0,
+  attention_required_count int default 0,
+  clean_threads_count int default 0,
+  threads jsonb default '[]'::jsonb
+);`}</pre>
+                </div>
+              </details>
+            </div>
+
+            {/* Quick manual archival section */}
+            <div className="bg-indigo-50/50 p-5 rounded-2xl border border-indigo-100 flex flex-col md:flex-row md:items-center justify-between gap-4">
+              <div className="space-y-1">
+                <h3 className="text-xs font-black uppercase text-indigo-900 tracking-wider">Archive Current Active State</h3>
+                <p className="text-[11px] text-indigo-950/70">
+                  Save a snapshot of your ongoing standup metrics, blocker items, and actions.
+                </p>
+              </div>
+
+              <div className="flex items-center gap-2 self-start md:self-center w-full md:w-auto">
+                <input
+                  type="text"
+                  value={customHistoryTitle}
+                  onChange={(e) => setCustomHistoryTitle(e.target.value)}
+                  placeholder="e.g. Sprint 4 Retrospective"
+                  className="w-full md:w-56 text-xs px-3 py-2 bg-white border border-indigo-200 rounded-xl focus:outline-hidden focus:ring-1 focus:ring-indigo-500 font-sans"
+                />
+                <button
+                  onClick={() => saveCurrentDashboardToHistory(customHistoryTitle.trim())}
+                  disabled={isSavingHistory}
+                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl text-xs shadow-md shrink-0 cursor-pointer disabled:opacity-50 transition"
+                >
+                  {isSavingHistory ? "Saving..." : "Save Snapshot"}
+                </button>
+              </div>
+            </div>
+
+            {/* History Grid/List Logs */}
+            <div className="space-y-4">
+              <div className="flex items-center justify-between border-b border-slate-200 pb-2">
+                <h3 className="text-xs font-black uppercase tracking-widest text-slate-400">
+                  Historical Signal Audits ({historyList.length})
+                </h3>
+                <button
+                  onClick={fetchHistory}
+                  className="text-[10px] text-indigo-600 font-extrabold hover:underline"
+                >
+                  Refresh Logs
+                </button>
+              </div>
+
+              {isLoadingHistory ? (
+                <div className="flex flex-col items-center justify-center py-12 space-y-3 bg-white border border-slate-100 rounded-2xl">
+                  <RefreshCw className="w-7 h-7 text-indigo-600 animate-spin" />
+                  <p className="text-xs text-slate-400">Querying signal database history...</p>
+                </div>
+              ) : historyList.length === 0 ? (
+                <div className="bg-white p-12 border border-dashed border-slate-200 rounded-2xl text-center space-y-4">
+                  <div className="mx-auto w-10 h-10 bg-slate-100 rounded-full flex items-center justify-center text-slate-400">
+                    <History className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h4 className="text-xs font-bold text-slate-700">Database Archive is Empty</h4>
+                    <p className="text-[11px] text-slate-400 mt-1 max-w-sm mx-auto">
+                      Generate an operational summary using the "Re-Analyze with Gemini" button in the dashboard, or archive the current layout status manually above!
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-4" id="history-logs-stack">
+                  {historyList.map((item) => {
+                    const savedDate = new Date(item.created_at).toLocaleDateString([], {
+                      month: "short",
+                      day: "numeric",
+                      year: "numeric"
+                    });
+                    const savedTime = new Date(item.created_at).toLocaleTimeString([], {
+                      hour: "2-digit",
+                      minute: "2-digit"
+                    });
+
+                    // Parse overall status coloring
+                    let statusBg = "bg-slate-100 text-slate-700 border-slate-200";
+                    if (item.project_status === "Stable" || item.project_status?.toLowerCase() === "completed") {
+                      statusBg = "bg-emerald-50 text-emerald-800 border-emerald-100";
+                    } else if (item.project_status === "Blocked") {
+                      statusBg = "bg-rose-50 text-rose-800 border-rose-100";
+                    } else if (item.project_status?.toLowerCase().includes("delay") || item.project_status?.toLowerCase().includes("risk")) {
+                      statusBg = "bg-amber-50 text-amber-800 border-amber-100";
+                    }
+
+                    return (
+                      <div
+                        key={item.id}
+                        className="bg-white border border-slate-200 rounded-xl p-5 hover:shadow-xs transition duration-250 flex flex-col md:flex-row justify-between items-start md:items-stretch gap-6 relative group"
+                      >
+                        {/* Summary details */}
+                        <div className="space-y-3 flex-grow max-w-3xl">
+                          <div className="flex flex-wrap items-center gap-2.5">
+                            <span className={`px-2 py-0.5 border text-[9px] font-black uppercase rounded-full ${statusBg}`}>
+                              {item.project_status}
+                            </span>
+                            <h4 className="text-xs font-extrabold text-slate-950 group-hover:text-indigo-600 transition font-mono">
+                              {item.title}
+                            </h4>
+                          </div>
+
+                          <p className="text-xs text-slate-500 leading-relaxed font-sans line-clamp-2">
+                            {item.summary}
+                          </p>
+
+                          {/* Stat pillars */}
+                          <div className="flex items-center gap-4 text-[9px] text-slate-400 font-bold uppercase tracking-wider font-mono">
+                            <div className="flex items-center gap-1">
+                              <Calendar className="w-3 h-3 text-slate-400" />
+                              <span>{savedDate} @ {savedTime}</span>
+                            </div>
+                            <span>•</span>
+                            <span className="text-slate-600">{item.messages_count} logs analyzed</span>
+                            <span>•</span>
+                            <span className={item.total_blockers > 0 ? "text-rose-600 font-extrabold" : "text-slate-400"}>
+                              {item.total_blockers} Blockers
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* Interactive operations */}
+                        <div className="flex md:flex-col justify-center items-center gap-2 min-w-[140px] shrink-0 border-t md:border-t-0 md:border-l border-slate-100 pt-4 md:pt-0 md:pl-4 self-stretch w-full md:w-auto">
+                          <button
+                            onClick={() => loadHistoryItemIntoDashboard(item)}
+                            className="w-full px-3 py-2 bg-slate-900 hover:bg-indigo-600 text-white font-extrabold rounded-xl text-[10px] uppercase shadow-xs cursor-pointer transition text-center whitespace-nowrap"
+                          >
+                            Load to Dashboard 🔄
+                          </button>
+                          <button
+                            onClick={() => deleteHistoryRecord(item.id)}
+                            className="px-3 py-1 text-rose-600 hover:bg-rose-50 rounded-xl text-[10px] font-bold cursor-pointer transition inline-flex items-center gap-1"
+                            title="Delete permanently"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                            Delete
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           </section>
         )}

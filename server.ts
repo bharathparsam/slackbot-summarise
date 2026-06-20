@@ -3,8 +3,64 @@ import path from "path";
 import dotenv from "dotenv";
 import { DEFAULT_SLACK_MESSAGES } from "./src/defaultData";
 import { GoogleGenAI, Type } from "@google/genai";
+import { createClient } from "@supabase/supabase-js";
+import fs from "fs";
 
 dotenv.config();
+
+const supabaseUrl = process.env.SUPABASE_URL || "";
+const supabaseAnonKey = process.env.SUPABASE_ANON_KEY || "";
+
+let supabaseClient: any = null;
+let useSupabase = false;
+
+// Helper to check if string looks like a valid HTTP or HTTPS URL before initializing createClient to avert crashes
+const isValidHttpUrl = (str: string) => {
+  try {
+    const url = new URL(str);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch (_) {
+    return false;
+  }
+};
+
+if (supabaseUrl && isValidHttpUrl(supabaseUrl) && supabaseAnonKey) {
+  try {
+    supabaseClient = createClient(supabaseUrl, supabaseAnonKey);
+    useSupabase = true;
+    console.log("Supabase Client initialized successfully!");
+  } catch (err) {
+    console.warn("Supabase initialization fell back to JSON file:", err);
+  }
+}
+
+// Fallback local JSON DB in case they are running locally / preview,
+// or in case the live Supabase table hasn't been created yet.
+const HISTORY_FILE = path.join(process.cwd(), "src", "historyDb.json");
+
+function loadLocalHistory() {
+  try {
+    if (!fs.existsSync(HISTORY_FILE)) {
+      fs.writeFileSync(HISTORY_FILE, JSON.stringify([], null, 2), "utf8");
+    }
+    const data = fs.readFileSync(HISTORY_FILE, "utf8");
+    return JSON.parse(data || "[]");
+  } catch (err) {
+    console.error("Local history read failed:", err);
+    return [];
+  }
+}
+
+function saveLocalHistory(list: any[]) {
+  try {
+    fs.writeFileSync(HISTORY_FILE, JSON.stringify(list, null, 2), "utf8");
+    return true;
+  } catch (err) {
+    console.error("Local history write failed:", err);
+    return false;
+  }
+}
+
 
 // Lazily get Google GenAI client to avoid crashing on start if API key is missing
 let aiClient: GoogleGenAI | null = null;
@@ -220,6 +276,200 @@ Generate ONLY a valid JSON array matching the required schema. Do not write anyt
     res.status(500).json({ error: error.message || "Internal Server Error occurred during parsing." });
   }
 });
+
+// API 4: Get Database Configuration & Provider Status
+app.get("/api/db-config", (req, res) => {
+  let maskedUrl = null;
+  if (supabaseUrl && isValidHttpUrl(supabaseUrl)) {
+    maskedUrl = supabaseUrl.length > 20
+      ? `${supabaseUrl.substring(0, 15)}...${supabaseUrl.substring(supabaseUrl.length - 5)}`
+      : supabaseUrl;
+  }
+  res.json({
+    useSupabase,
+    supabaseUrl: maskedUrl,
+    hasKey: !!supabaseAnonKey,
+    historyFilePath: HISTORY_FILE,
+  });
+});
+
+// API 5: Get History of Summaries
+app.get("/api/history", async (req, res) => {
+  try {
+    if (useSupabase && supabaseClient) {
+      const { data, error } = await supabaseClient
+        .from("standup_history")
+        .select("*")
+        .order("created_at", { ascending: false });
+
+      if (error) {
+        // If table doesn't exist, fallback silently to local files to avoid crashing the frontend
+        if (error.code === "PGRST116" || error.message?.includes("relation") || error.message?.includes("does not exist")) {
+          console.warn("Supabase relation 'standup_history' does not exist yet. Using local fallback file database.");
+          const localList = loadLocalHistory();
+          res.json({ list: localList, fallbackUsed: true, errorMsg: "Table 'standup_history' not found in your Supabase database. Please create it using the SQL editor script in the Guide tab!" });
+          return;
+        }
+        throw error;
+      }
+
+      const formattedData = (data || []).map((row: any) => ({
+        id: row.id,
+        created_at: row.created_at,
+        title: row.title,
+        messages_count: row.messages_count,
+        summary: row.summary,
+        project_status: row.project_status,
+        total_blockers: row.total_blockers,
+        attention_required_count: row.attention_required_count,
+        clean_threads_count: row.clean_threads_count,
+        threads: typeof row.threads === "string" ? JSON.parse(row.threads) : row.threads,
+      }));
+
+      res.json({ list: formattedData, fallbackUsed: false });
+    } else {
+      const localList = loadLocalHistory();
+      res.json({ list: localList, fallbackUsed: true });
+    }
+  } catch (err: any) {
+    console.error("Get history failed (using local JSON file fallback):", err);
+    const localList = loadLocalHistory();
+    res.json({ list: localList, fallbackUsed: true, errorMsg: err.message });
+  }
+});
+
+// API 6: Save a Summary to History
+app.post("/api/history", async (req, res) => {
+  try {
+    const { title, messages_count, summary, project_status, total_blockers, attention_required_count, clean_threads_count, threads } = req.body;
+
+    const newId = `hist_${Date.now()}`;
+    const newRecord = {
+      id: newId,
+      created_at: new Date().toISOString(),
+      title: title || `Summary - ${new Date().toLocaleString()}`,
+      messages_count: messages_count || 0,
+      summary: summary || "",
+      project_status: project_status || "Stable",
+      total_blockers: total_blockers || 0,
+      attention_required_count: attention_required_count || 0,
+      clean_threads_count: clean_threads_count || 0,
+      threads: threads || [],
+    };
+
+    if (useSupabase && supabaseClient) {
+      const supabaseRow = {
+        title: newRecord.title,
+        messages_count: newRecord.messages_count,
+        summary: newRecord.summary,
+        project_status: newRecord.project_status,
+        total_blockers: newRecord.total_blockers,
+        attention_required_count: newRecord.attention_required_count,
+        clean_threads_count: newRecord.clean_threads_count,
+        threads: typeof newRecord.threads === "string" ? newRecord.threads : JSON.stringify(newRecord.threads),
+      };
+
+      const { data, error } = await supabaseClient
+        .from("standup_history")
+        .insert([supabaseRow])
+        .select();
+
+      if (error) {
+        if (error.message?.includes("relation") || error.message?.includes("does not exist")) {
+          console.warn("Supabase table 'standup_history' does not exist. Saving to local.json file instead.");
+          const localList = loadLocalHistory();
+          localList.unshift(newRecord);
+          saveLocalHistory(localList);
+          res.json({ success: true, record: newRecord, fallbackUsed: true, warning: "Table 'standup_history' not found in Supabase. Created locally inside historyDb.json!" });
+          return;
+        }
+        throw error;
+      }
+
+      const savedRow = data ? data[0] : null;
+      const responseRecord = savedRow ? {
+        id: savedRow.id,
+        created_at: savedRow.created_at,
+        title: savedRow.title,
+        messages_count: savedRow.messages_count,
+        summary: savedRow.summary,
+        project_status: savedRow.project_status,
+        total_blockers: savedRow.total_blockers,
+        attention_required_count: savedRow.attention_required_count,
+        clean_threads_count: savedRow.clean_threads_count,
+        threads: typeof savedRow.threads === "string" ? JSON.parse(savedRow.threads) : savedRow.threads,
+      } : newRecord;
+
+      res.json({ success: true, record: responseRecord, fallbackUsed: false });
+    } else {
+      const localList = loadLocalHistory();
+      localList.unshift(newRecord);
+      saveLocalHistory(localList);
+      res.json({ success: true, record: newRecord, fallbackUsed: true });
+    }
+  } catch (err: any) {
+    console.error("Save history failed:", err);
+    try {
+      const { title, messages_count, summary, project_status, total_blockers, attention_required_count, clean_threads_count, threads } = req.body;
+      const newRecord = {
+        id: `hist_${Date.now()}`,
+        created_at: new Date().toISOString(),
+        title: title || `Summary - ${new Date().toLocaleString()}`,
+        messages_count: messages_count || 0,
+        summary: summary || "",
+        project_status: project_status || "Stable",
+        total_blockers: total_blockers || 0,
+        attention_required_count: attention_required_count || 0,
+        clean_threads_count: clean_threads_count || 0,
+        threads: threads || [],
+      };
+      const localList = loadLocalHistory();
+      localList.unshift(newRecord);
+      saveLocalHistory(localList);
+      res.json({ success: true, record: newRecord, fallbackUsed: true, errorMsg: err.message });
+    } catch (saveError: any) {
+      res.status(500).json({ error: "Failed to persist summary: " + saveError.message });
+    }
+  }
+});
+
+// API 7: Delete a Summary from History
+app.delete("/api/history/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (useSupabase && supabaseClient && !id.startsWith("hist_")) {
+      const { error } = await supabaseClient
+        .from("standup_history")
+        .delete()
+        .eq("id", id);
+
+      if (error) {
+        if (error.message?.includes("relation") || error.message?.includes("does not exist")) {
+          const localList = loadLocalHistory();
+          const filtered = localList.filter((item: any) => item.id !== id);
+          saveLocalHistory(filtered);
+          res.json({ success: true, fallbackUsed: true });
+          return;
+        }
+        throw error;
+      }
+      res.json({ success: true, fallbackUsed: false });
+    } else {
+      const localList = loadLocalHistory();
+      const filtered = localList.filter((item: any) => item.id !== id);
+      saveLocalHistory(filtered);
+      res.json({ success: true, fallbackUsed: true });
+    }
+  } catch (err: any) {
+    console.error("Delete history failed:", err);
+    const localList = loadLocalHistory();
+    const filtered = localList.filter((item: any) => item.id !== req.params.id);
+    saveLocalHistory(filtered);
+    res.json({ success: true, fallbackUsed: true, errorMsg: err.message });
+  }
+});
+
 
 // Configure Vite or Static files depending on mode
 const isVercel = process.env.VERCEL === "1" || !!process.env.NOW_BUILDER;
